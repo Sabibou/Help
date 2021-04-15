@@ -1,0 +1,131 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import math
+import time
+import pycuda.driver as cuda
+import pycuda.autoinit
+from pycuda.compiler import SourceModule
+
+CUDA Kernel 
+
+mod = SourceModule("""
+#include <math.h>
+__global__ void blur_filter(const unsigned char *inputChannel, unsigned char *outputChannel,
+                             const unsigned int width, const unsigned int height,
+                             const float *gaussianKernel, const unsigned int filterWidth) 
+{
+    const unsigned int row = threadIdx.y + blockIdx.y * blockDim.y;
+    const unsigned int col = threadIdx.x + blockIdx.x * blockDim.x;
+    if(row < height && col < width) {
+        const int filterHalf = filterWidth / 2;
+        float blur = 0.0;
+        for(int i = -filterHalf; i <= filterHalf; i++) {
+            for(int j = -filterHalf; j <= filterHalf; j++) {
+                const unsigned int y = max(0, min(height - 1, row + i));
+                const unsigned int x = max(0, min(width - 1, col + j));
+
+                const float w = gaussianKernel[(j + filterHalf) + (i + filterHalf) * filterWidth];
+                blur += w * inputChannel[x + y * width];
+            }
+        }
+        outputChannel[col + row * width] = static_cast<unsigned char>(blur);
+    }
+}
+""")
+
+BLOCK_SIZE = 1024
+dim_block = 32
+filterWidth = int(5)
+blur_filter = mod.get_function('blur_filter')
+
+Input image
+
+# Open image from path
+img = Image.open( "images/sobel/sonic.png" ) #you can load your own image
+
+# Convert image to RGB matrix
+rgb_img = img.convert('RGB')
+
+# Save the image matrix in a numpy array	
+input_px = np.array(rgb_img)    
+
+# Get width and height of image
+width, height = rgb_img.size
+# Compute them to have the total size
+size = width * height
+
+#Convert the input image into float matrix
+input_px = input_px.astype(np.float32)
+
+# Show result
+fig1 = plt.figure(1)
+ax1 = fig1.add_subplot(111)
+ax1.imshow(rgb_img)
+fig1.show()
+
+Blur filtered image
+
+# Create gaussian filter matrix
+kernel_matrix =  np.array([[1/64, 1/32	, 1/16  , 1/32 	, 1/64],
+                  [1/32 	, 1/16 	, 1/8  	, 1/16 	, 1/32]	,
+                  [1/16 	, 1/8 	, 1/4 	, 1/8 	, 1/16]	,
+                  [1/32 	, 1/16 	, 1/8   , 1/16 	, 1/32]	,
+                  [1/64 	, 1/32	, 1/16 	, 1/32  , 1/64]]) 
+gaussianKernel = kernel_matrix / kernel_matrix.sum()
+timeStart = time.time()
+
+# Create an empty 2D array with the same shape as our input array
+blur_px = np.empty(shape=(height, width))
+
+# Memory allocation inside the GPU for input image
+input_px_gpu = cuda.mem_alloc(input_px.nbytes)
+
+# Copy the input image inside the gpu (host -> device)
+cuda.memcpy_htod(input_px_gpu, input_px)
+
+# Make sure that the output image is float format
+blur_px = blur_px.astype(np.float32)
+
+# Memory allocation inside the gpu for output image
+blur_px_gpu = cuda.mem_alloc(blur_px.nbytes)
+
+# Memory allocation inside the gpu for the gaussian filter matrix
+#gaussianKernel_gpu = cuda.In(gaussianKernel)
+
+# Copy the empty array inside the gpu memory (host -> device)
+# 1st param : allocated memory
+# 2nd param : data
+cuda.memcpy_htod(blur_px_gpu, blur_px)
+
+# Apply blur filter to input image
+# input_px  : input image 
+# blur_px_gpu : output image - blur image
+# width        : width of input image 
+# height       : height of input image
+# block        : kernel block size
+# grid         : kernel grid size
+#gaussianKernel: gaussian filter matrix
+#filterWidth:
+
+
+print("Blur Filter GPU")
+blur_filter(input_px_gpu, blur_px_gpu,
+  np.int32(width),
+  np.int32(height),
+  gaussianKernel,
+  np.int32(filterWidth),
+  block = (dim_block, dim_block, 1),
+  grid = (math.ceil (width / dim_block), math.ceil (height / dim_block), 1)
+  )
+
+
+# Copy back data from gpu memory (device -> host)
+# 1st param : where to store it on host
+# 2nd param : new data    
+cuda.memcpy_dtoh(blur_px, blur_px_gpu)
+
+timeStop = time.time()
+
+# Show enlapsed time
+print("Execution time: ", timeStop - timeStart)
